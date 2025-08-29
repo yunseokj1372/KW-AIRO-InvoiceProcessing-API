@@ -10,4 +10,4 @@ app.include_router(redo.router)
 # Root endpoint
 @app.get("/")
 def read_root():
-    return {"message": "Welcome to AIRO's KPI app"}
+    return {"message": "Welcome to AIRO's Invoice Processing API"}
