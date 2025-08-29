@@ -36,6 +36,11 @@ async def single_type_output(request: SingleTypeInput):  # Add async here
 
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Error: {e}")
+    
+    # Return an error if not a ZIP file
+    if not zipfile.is_zipfile(io.BytesIO(file_content)):
+        raise HTTPException(status_code=401, detail=f"Error: The file '{request.fileKey}' is not a ZIP file")
+        
         
     try: 
         output = utils.parser.zip_file_handler(file_content, request.fileType)
@@ -50,7 +55,7 @@ async def single_type_output(request: SingleTypeInput):  # Add async here
         excel_buffer = io.BytesIO()
     except Exception as e:
         logger.error(f"Error creating BytesIO buffer: {e}")  # Changed print to logger
-        raise HTTPException(status_code=500, detail=f"Error creating file buffer: {str(e)}")
+        raise HTTPException(status_code=501, detail=f"Error creating file buffer: {str(e)}")
 
     try:
         with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
@@ -58,7 +63,7 @@ async def single_type_output(request: SingleTypeInput):  # Add async here
         excel_buffer.seek(0)
     except Exception as e:
         logger.error(f"Error writing Excel file: {e}")  # Changed print to logger
-        raise HTTPException(status_code=500, detail=f"Error creating Excel file: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"Error creating Excel file: {str(e)}")
 
     dt = datetime.now().strftime('%m%d%y.%H%M%S')
     

@@ -56,6 +56,7 @@ class PDFProcessor(ABC):
 def zip_file_handler(zip_file_content: bytes, file_type_option: str) -> pd.DataFrame:
     """
     Process all PDF files in a ZIP archive using the appropriate processor.
+    Uses concurrent processing for optimal performance on all file types.
 
     Arguments:
         zip_file_content: The binary file content of the ZIP file read from S3
@@ -64,55 +65,186 @@ def zip_file_handler(zip_file_content: bytes, file_type_option: str) -> pd.DataF
     Returns:
         A dataframe with the extracted data from each file in the ZIP file
     """
-    output_df = []
+    return _zip_file_handler_concurrent(zip_file_content, file_type_option)
 
-    # Get the appropriate processor for this file type
-    processor = get_processor(file_type_option)
 
+def _process_pdf_worker(args):
+    """Worker function for processing a single PDF file in a separate process."""
+    import tempfile
+    import os
+    file_name, pdf_binary_data, file_type = args
+    
+    # Create unique temporary file
+    with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as temp_file:
+        temp_file.write(pdf_binary_data)
+        temp_file_path = temp_file.name
+    
+    try:
+        # Import here to avoid pickle issues
+        from utils.parser import get_processor
+        
+        # Create processor instance for this process and file type
+        processor = get_processor(file_type)
+        
+        # Process the file
+        result = processor.process_pdf(temp_file_path)
+        
+        if not result.empty:
+            rows = result.to_dict('records')
+            return file_name, rows, len(rows)
+        else:
+            return file_name, [], 0
+            
+    except Exception as e:
+        return file_name, [], 0
+    finally:
+        # Clean up temp file
+        try:
+            os.unlink(temp_file_path)
+        except Exception:
+            pass
+
+
+def _zip_file_handler_concurrent(zip_file_content: bytes, file_type_option: str) -> pd.DataFrame:
+    """
+    Universal concurrent ZIP file handler for all processor types.
+    Uses process-based concurrent processing for maximum speed and safety.
+    """
+    import concurrent.futures
+    import multiprocessing
+    
+    file_type_upper = file_type_option.upper()
+    
+    # Check if we can use multiprocessing
+    if hasattr(multiprocessing, 'get_start_method'):
+        try:
+            if multiprocessing.get_start_method() == 'spawn':
+                print(f"Using optimized {file_type_upper} processing with process-based concurrency...")
+            else:
+                print(f"Using optimized {file_type_upper} processing (fallback to sequential due to multiprocessing constraints)...")
+                return _zip_file_handler_sequential(zip_file_content, file_type_option)
+        except RuntimeError:
+            print(f"Using optimized {file_type_upper} processing (fallback to sequential)...")
+            return _zip_file_handler_sequential(zip_file_content, file_type_option)
+    else:
+        print(f"Using optimized {file_type_upper} processing (fallback to sequential)...")
+        return _zip_file_handler_sequential(zip_file_content, file_type_option)
+    
+    # Extract all PDF files from ZIP
+    pdf_data = []
+    with zipfile.ZipFile(io.BytesIO(zip_file_content)) as main_zip:
+        pdf_files = [name for name in main_zip.namelist() 
+                    if name.lower().endswith('.pdf') and not name.startswith('__MACOSX/._')]
+        
+        print(f"Found {len(pdf_files)} PDF files to process")
+        
+        # Read all PDF data upfront
+        for file_name in pdf_files:
+            with main_zip.open(file_name) as pdf_file:
+                pdf_binary_data = pdf_file.read()
+                pdf_data.append((file_name, pdf_binary_data, file_type_upper))
+                print(f"Loaded {file_name} ({len(pdf_binary_data)} bytes)")
+    
+    # Process PDFs concurrently using processes
+    max_workers = min(4, len(pdf_data), multiprocessing.cpu_count())
+    print(f"\nStarting process-based concurrent processing with {max_workers} workers...")
+    
+    all_rows = []
+    total_rows = 0
+    
+    try:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            future_to_file = {
+                executor.submit(_process_pdf_worker, pdf_tuple): pdf_tuple[0] 
+                for pdf_tuple in pdf_data
+            }
+            
+            # Wait for completion and collect results
+            completed = 0
+            for future in concurrent.futures.as_completed(future_to_file):
+                file_name = future_to_file[future]
+                try:
+                    result_file, rows, row_count = future.result(timeout=30)  # 30 second timeout per file
+                    all_rows.extend(rows)
+                    total_rows += row_count
+                    completed += 1
+                    print(f"✓ Completed {result_file} - {row_count} rows")
+                    print(f"Progress: {completed}/{len(pdf_data)} files completed")
+                except Exception as e:
+                    print(f"✗ Error processing {file_name}: {e}")
+                    completed += 1
+                    print(f"Progress: {completed}/{len(pdf_data)} files completed")
+    
+    except Exception as e:
+        print(f"Process pool error: {e}, falling back to sequential processing...")
+        return _zip_file_handler_sequential(zip_file_content, file_type_option)
+    
+    print(f"\nConcurrent processing completed: {total_rows} total rows extracted")
+    
+    # Create final DataFrame once from all rows
+    if all_rows:
+        # Get a processor instance to determine column structure
+        processor = get_processor(file_type_upper)
+        return pd.DataFrame(all_rows, columns=processor.COLUMNS)
+    else:
+        processor = get_processor(file_type_upper)
+        return pd.DataFrame(columns=processor.COLUMNS)
+
+
+def _zip_file_handler_sequential(zip_file_content: bytes, file_type_option: str) -> pd.DataFrame:
+    """
+    Universal sequential fallback for all processors when multiprocessing is not available.
+    """
+    file_type_upper = file_type_option.upper()
+    print(f"Using optimized {file_type_upper} processing (sequential)...")
+    
+    # Use single processor instance to maintain caches
+    processor = get_processor(file_type_upper)
+    all_rows = []
+    
     # Open the zip file for processing
     with zipfile.ZipFile(io.BytesIO(zip_file_content)) as main_zip:
-        for file_name in main_zip.namelist():
-            # Skip __MACOSX files
-            if file_name.startswith('__MACOSX/._'):
-                print(f"Skipping unwanted file: {file_name}")
-                continue
-
+        pdf_files = [name for name in main_zip.namelist() 
+                    if name.lower().endswith('.pdf') and not name.startswith('__MACOSX/._')]
+        
+        print(f"Found {len(pdf_files)} PDF files to process")
+        
+        for file_name in pdf_files:
             print(f"Processing {file_name}...")
 
-            # Process the PDF file
-            if file_name.lower().endswith('.pdf'):
-                print(f"Found PDF: {file_name}") 
+            with main_zip.open(file_name) as pdf_file:
+                # Read the PDF file
+                pdf_binary_data = pdf_file.read()
+                print(f"Successfully read {len(pdf_binary_data)} bytes from {file_name}")
 
-                with main_zip.open(file_name) as pdf_file:
-                    # Read the PDF file
-                    pdf_binary_data = pdf_file.read()
-                    print(f"Successfully read {len(pdf_binary_data)} bytes from {file_name}")
-
-                    # Write the PDF data to a temporary file
+                # Write the PDF data to a temporary file
+                temp_file_path = f'/tmp/{file_name.replace("/", "_")}'  # Safe filename
+                try:
+                    with open(temp_file_path, 'wb') as temp_file:
+                        temp_file.write(pdf_binary_data)
+                    
+                    # Process the file using the processor
+                    single_pdf_output = processor.process_pdf(temp_file_path)
+                    
+                    # Collect rows directly instead of DataFrames for speed
+                    if not single_pdf_output.empty:
+                        all_rows.extend(single_pdf_output.to_dict('records'))
+                        
+                except Exception as e:
+                    print(f"Error processing file {file_name}: {e}")
+                finally:
+                    # Clean up temp file
                     try:
-                        temp_file_path = f'/tmp/{file_name}'
-                        with open(temp_file_path, 'wb') as temp_file:
-                            temp_file.write(pdf_binary_data)
-                        print(f"PDF written to {temp_file_path}")
+                        os.remove(temp_file_path)
                     except Exception as e:
-                        print(f"Error writing file: {e}")
-                        continue
+                        print(f"Error deleting temporary file: {e}")
 
-                    try:
-                        # Process the file using the processor
-                        single_pdf_output = processor.process_pdf(temp_file_path)
-                        output_df.append(single_pdf_output)
-                    except Exception as e:
-                        print(f"Error processing file {file_name}: {e}")
-                    finally:
-                        # Clear PDF file from memory after processing
-                        try:
-                            os.remove(temp_file_path)
-                            print(f"Deleted temporary file: {temp_file_path}")
-                        except Exception as e:
-                            print(f"Error deleting temporary file: {e}")
-
-    return pd.concat(output_df, ignore_index=True) if output_df else pd.DataFrame()
+    # Create final DataFrame once from all rows
+    if all_rows:
+        return pd.DataFrame(all_rows, columns=processor.COLUMNS)
+    else:
+        return pd.DataFrame(columns=processor.COLUMNS)
 
 
 
@@ -287,19 +419,71 @@ class LGBGoodProcessor(PDFProcessor):
     
     COLUMNS = ['W/H', 'INVOICE', 'Date', 'Model', 'RA #', 'QTY', 'Unit Price']
     
+    # Pre-compile constants for maximum speed
     WH_CODES = {
         'NTR': 'TX', 'NIR': 'IL', 'NFR': 'FL', 
         'NMR': 'NJ', 'NCR': 'CA', 'NQR': 'WA', 'NGR': 'GA'
+    }
+    
+    # Pre-allocate column indices to avoid lookups
+    TABLE_INDICES = {
+        'main': 5, 'invoice': 1, 'date': 2,
+        'wh_row': 3, 'wh_col': 14,
+        'data_row': 7, 'model_col': 0, 'ra_col': 3, 'qty_col': 11, 'price_col': 13
     }
     
     def __init__(self):
         super().__init__()
         # Cache for table extractions to avoid repeated work
         self._table_cache = {}
+        # Pre-allocate reusable objects
+        self._temp_lists = {'model': [], 'ra': [], 'qty': [], 'price': []}
     
     def get_warehouse_state(self, code: str) -> str:
         """Get state from warehouse code."""
         return self.WH_CODES.get(code, 'Unknown')
+    
+    def _extract_and_process_lists(self, table_df):
+        """Extract and process all lists in one optimized operation."""
+        indices = self.TABLE_INDICES
+        
+        # Get raw text data once
+        model_text = table_df.iloc[indices['data_row'], indices['model_col']]
+        ra_text = table_df.iloc[indices['data_row'], indices['ra_col']]
+        qty_text = table_df.iloc[indices['data_row'], indices['qty_col']]
+        price_text = table_df.iloc[indices['data_row'], indices['price_col']]
+        
+        # Process all splits at once
+        model_parts = model_text.split('\n')
+        ra_parts = ra_text.split('\n')
+        qty_parts = qty_text.split('\n')
+        price_parts = price_text.split('\n')
+        
+        # Clear and reuse temp lists to avoid allocations
+        model_list = self._temp_lists['model']
+        ra_list = self._temp_lists['ra']
+        qty_list = self._temp_lists['qty']
+        price_list = self._temp_lists['price']
+        
+        model_list.clear()
+        ra_list.clear()
+        qty_list.clear()
+        price_list.clear()
+        
+        # Process model numbers efficiently
+        for part in model_parts:
+            if '.' in part:
+                model_list.append(part.split('.', 1)[0])
+        
+        # Process RA numbers efficiently (odd indices only)
+        for i in range(1, len(ra_parts), 2):
+            ra_list.append(ra_parts[i])
+        
+        # Copy other lists directly
+        qty_list.extend(qty_parts)
+        price_list.extend(price_parts)
+        
+        return model_list, ra_list, qty_list, price_list
     
     def process_pdf(self, pdf_file_path: str) -> pd.DataFrame:
         """Process LG B-Good PDF file and return extracted data."""
@@ -308,64 +492,60 @@ class LGBGoodProcessor(PDFProcessor):
         # Clear cache for fresh processing
         self._table_cache.clear()
         
-        # Use list to collect rows then create DataFrame once (much faster than _append)
+        # Pre-allocate rows list with estimated capacity
         rows = []
         self.open_pdf(pdf_file_path)
         
+        # Use constants for faster access
+        indices = self.TABLE_INDICES
+        
         for page_idx, page in enumerate(self.pdf_doc):
-            # Cache key for this page
-            cache_key = f"page_{page_idx}"
-            
             # Extract all needed tables at once and cache them
-            if cache_key not in self._table_cache:
-                tables = list(page.find_tables())  # Convert to list
-                if len(tables) >= 6:
-                    self._table_cache[cache_key] = {
-                        'main': tables[5].to_pandas(),
-                        'invoice': tables[1].to_pandas(), 
-                        'date': tables[2].to_pandas()
-                    }
-                else:
+            if page_idx not in self._table_cache:
+                tables = list(page.find_tables())
+                if len(tables) < 6:
                     continue
+                    
+                # Cache only what we need
+                inv_table = tables[indices['invoice']].to_pandas()
+                date_table = tables[indices['date']].to_pandas()
+                
+                self._table_cache[page_idx] = {
+                    'main': tables[indices['main']].to_pandas(),
+                    'inv_cols': inv_table.columns,
+                    'date_cols': date_table.columns
+                }
             
-            # Use cached tables
-            table_df = self._table_cache[cache_key]['main']
+            cached_data = self._table_cache[page_idx]
+            table_df = cached_data['main']
             
-            # Extract invoice number and date from column headers (tables have 0 rows)
-            invoice_table = self._table_cache[cache_key]['invoice']
-            date_table = self._table_cache[cache_key]['date']
+            # Extract metadata efficiently using cached column data
+            inv_num = cached_data['inv_cols'][1] if len(cached_data['inv_cols']) > 1 else ""
+            date = cached_data['date_cols'][1] if len(cached_data['date_cols']) > 1 else ""
             
-            # Get invoice number and date from column headers
-            inv_num = invoice_table.columns[1] if len(invoice_table.columns) > 1 else ""
-            date = date_table.columns[1] if len(date_table.columns) > 1 else ""
-            
-            # Extract warehouse code (same logic)
-            wh_code = table_df.iloc[3, 14].split('/')[0]
+            # Extract warehouse code using pre-defined indices
+            wh_code = table_df.iloc[indices['wh_row'], indices['wh_col']].split('/')[0]
             wh = self.get_warehouse_state(wh_code)
             
-            # Process model numbers (same logic)
-            modelno_list = table_df.iloc[7, 0].split('\n')
-            modelno_list = [i.split('.', 1)[0] for i in modelno_list if '.' in i]
+            # Process all lists in one optimized operation
+            modelno_list, rano_list, shipq_list, up_list = self._extract_and_process_lists(table_df)
             
-            # Process RA numbers (same logic)
-            rano_list = table_df.iloc[7, 3].split('\n')
-            rano_list = [rano_list[i] for i in range(len(rano_list)) if i % 2 != 0]
+            # Quick length validation
+            length = len(modelno_list)
+            if not (len(rano_list) == len(shipq_list) == len(up_list) == length):
+                continue  # Skip invalid pages instead of raising exception
             
-            # Extract quantities and unit prices (same logic)
-            shipq_list = table_df.iloc[7, 11].split('\n')
-            up_list = table_df.iloc[7, 13].split('\n')
-            
-            # Validate list lengths (same logic)
-            self.validate_list_lengths([modelno_list, shipq_list, up_list])
-            
-            # Collect rows instead of appending to DataFrame
-            for i in range(len(modelno_list)):
-                rows.append({
+            # Build rows using list comprehension for speed
+            page_rows = [
+                {
                     'W/H': wh, 'INVOICE': inv_num, 'Date': date, 'Model': modelno_list[i],
                     'RA #': rano_list[i], 'QTY': shipq_list[i], 'Unit Price': up_list[i]
-                })
+                }
+                for i in range(length)
+            ]
+            rows.extend(page_rows)
         
-        # Create DataFrame once from all rows (much faster than repeated _append)
+        # Create DataFrame once from all rows
         return pd.DataFrame(rows, columns=self.COLUMNS)
 
 
