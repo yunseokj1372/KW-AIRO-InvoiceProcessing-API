@@ -51,21 +51,19 @@ async def single_type_output(request: SingleTypeInput):
                 pool,
                 lambda: utils.parser.zip_file_handler(file_content, request.fileType)
             )
+            
+            # Create Excel file asynchronously
+            excel_buffer = io.BytesIO()
+            await loop.run_in_executor(
+                pool,
+                lambda: create_excel_file(excel_buffer, output, request.fileType)
+            )
+            excel_buffer.seek(0)
+            
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"Invalid file type: {e}")
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error processing the ZIP file: {str(e)}")
-
-        # Handle Excel file creation in the thread pool as well
-        try:
-            excel_buffer = io.BytesIO()         
-            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                output.to_excel(writer, index=False, sheet_name=request.fileType.lower())
-            excel_buffer.seek(0)
-                
-        except Exception as e:
-            logger.error(f"Error creating Excel file: {e}")
-            raise HTTPException(status_code=501, detail=f"Error creating Excel file: {str(e)}")
 
     dt = datetime.now().strftime('%m%d%y.%H%M%S')
     filename = f"invoice_output_{dt}.xlsx"
@@ -80,6 +78,10 @@ async def single_type_output(request: SingleTypeInput):
         headers=headers,
         media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     )
+
+def create_excel_file(buffer, df, file_type):
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name=file_type.lower())
     
 
 
