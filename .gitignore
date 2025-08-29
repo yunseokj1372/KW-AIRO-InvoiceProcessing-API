@@ -1,0 +1,10 @@
+__pycache__/
+*.pth
+*.npy
+*.xlsx
+*.DS_Store
+*.pt
+*.csv
+/app/data/*
+.env
+*.log
