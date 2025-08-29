@@ -9,6 +9,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse  # Add this import
 from pydantic import BaseModel
 import logging
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 # Set up file logging
 logging.basicConfig(
@@ -30,10 +32,9 @@ class SingleTypeInput(BaseModel):
 
 
 @router.post("/single")
-async def single_type_output(request: SingleTypeInput):  # Add async here
+async def single_type_output(request: SingleTypeInput):
     try:
-        file_content = request.fileKey  # Fixed to use proper Pydantic model access
-
+        file_content = request.fileKey
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Error: {e}")
     
@@ -41,36 +42,34 @@ async def single_type_output(request: SingleTypeInput):  # Add async here
     if not zipfile.is_zipfile(io.BytesIO(file_content)):
         raise HTTPException(status_code=401, detail=f"Error: The file '{request.fileKey}' is not a ZIP file")
         
-        
-    try: 
-        output = utils.parser.zip_file_handler(file_content, request.fileType)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid file type: {e}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing the ZIP file: {str(e)}")
-    
-    # In-memory buffer for Excel file
-    logger.info('Writing file to Excel...')  # Changed print to logger
-    try:
-        excel_buffer = io.BytesIO()
-    except Exception as e:
-        logger.error(f"Error creating BytesIO buffer: {e}")  # Changed print to logger
-        raise HTTPException(status_code=501, detail=f"Error creating file buffer: {str(e)}")
+    # Create a ThreadPoolExecutor for CPU-bound operations
+    loop = asyncio.get_event_loop()
+    with ThreadPoolExecutor() as pool:
+        try:
+            # Run zip_file_handler in a thread pool since it's CPU-bound
+            output = await loop.run_in_executor(
+                pool,
+                lambda: utils.parser.zip_file_handler(file_content, request.fileType)
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid file type: {e}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error processing the ZIP file: {str(e)}")
 
-    try:
-        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-            output.to_excel(writer, index=False, sheet_name=request.fileType.lower())  # Fixed to use proper Pydantic model access
-        excel_buffer.seek(0)
-    except Exception as e:
-        logger.error(f"Error writing Excel file: {e}")  # Changed print to logger
-        raise HTTPException(status_code=502, detail=f"Error creating Excel file: {str(e)}")
+        # Handle Excel file creation in the thread pool as well
+        try:
+            excel_buffer = io.BytesIO()         
+            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                output.to_excel(writer, index=False, sheet_name=request.fileType.lower())
+            excel_buffer.seek(0)
+                
+        except Exception as e:
+            logger.error(f"Error creating Excel file: {e}")
+            raise HTTPException(status_code=501, detail=f"Error creating Excel file: {str(e)}")
 
     dt = datetime.now().strftime('%m%d%y.%H%M%S')
-    
-    # Create filename for the Excel file
     filename = f"invoice_output_{dt}.xlsx"
     
-    # Return the Excel file as a StreamingResponse
     headers = {
         'Content-Disposition': f'attachment; filename="{filename}"',
         'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
