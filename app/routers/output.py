@@ -24,13 +24,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/output", tags=["output"])
 
-class SingleInvoiceInput(BaseModel):
+class SingleTypeInput(BaseModel):
     fileKey: str
     fileType: str
 
 
 @router.post("/single")
-async def single_invoice_output(request: SingleInvoiceInput):  # Add async here
+async def single_type_output(request: SingleTypeInput):  # Add async here
     try:
         file_content = request.fileKey  # Fixed to use proper Pydantic model access
 
