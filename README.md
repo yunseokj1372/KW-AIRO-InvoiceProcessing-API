@@ -10,3 +10,8 @@ conda activate invoice
 ```bash
 pip install -r requirements.txt
 ```
+
+### Development Mode
+```bash
+uvicorn app.main:app --host localhost --port 6000
+```
