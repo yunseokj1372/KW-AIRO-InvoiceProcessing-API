@@ -1,7 +1,7 @@
 # KW-AIRO-InvoiceProcessing-API
 
 ```bash
-conda create -n invoice python=3.11.7 pip
+printf 'y\y\n' conda create -n invoice python=3.11.7 pip
 conda activate invoice
 ```
 
@@ -9,9 +9,11 @@ conda activate invoice
 
 ```bash
 pip install -r requirements.txt
+
+printf "y" conda install -c conda-forge pymupdf==1.24.2
 ```
 
 ### Development Mode
 ```bash
-uvicorn app.main:app --host localhost --port 6000
+uvicorn app.main:app --host localhost --port 8001
 ```
