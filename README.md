@@ -13,9 +13,9 @@ pip install -r requirements.txt
 printf "y" conda install -c conda-forge pymupdf==1.24.2
 ```
 
-### Development Mode
+### Production Mode (Dev Mode localhost)
 ```bash
 tmux new -s invoice
 
-uvicorn app.main:app --host localhost --port 8001
+uvicorn app.main:app --host 0.0.0.0 --port 8001
 ```
