@@ -15,5 +15,7 @@ printf "y" conda install -c conda-forge pymupdf==1.24.2
 
 ### Development Mode
 ```bash
+tmux new -s invoice
+
 uvicorn app.main:app --host localhost --port 8001
 ```
