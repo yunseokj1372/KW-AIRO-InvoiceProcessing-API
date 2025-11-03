@@ -556,98 +556,6 @@ def lgbgood_pdf_to_excel(pdf_file_path: str) -> pd.DataFrame:
     return processor.process_pdf(pdf_file_path)
 
 
-
-def lgparts_pdf_to_excel(pdf_file_path):
-    """
-    Arguments:
-        - pdf_file_path: A filepath to the PDF file stored in temporary memory\
-        
-    Returns:
-        - output: A dataframe with the extracted data for a single PDF file
-    """
-
-    print('lgparts process starting')
-
-    # Initialize the final output df
-    output = pd.DataFrame(columns=[
-        'Biz Type', 'WH Code', 'Type\nIN/OUT/INOUT/\nOUTRETURN/INRETURN', 'Vendor Code', 'Customer Code', 
-        'Order Date', 'Receive Date', 'Issue Date', 'TO NO', 'Ref No **\n(Invoice No)', 'Ref No 2', 'Memo', 
-        'Shipper Company', 'ShipFrom\nCompany', 'ShipFrom\nAddress', 'ShipFrom\nCity', 'ShipFrom\nState', 
-        'ShipFrom\nZip Code', 'ShipFrom\nCountry Code', 'ShipTo\nCompany', 'ShipTo\nAddress', 'ShipTo\nCity', 
-        'ShipTo\nState', 'ShipTo\nZip Code', 'ShipTo\nCountry Code', 'Model No **', 'Item Serial No **\n(Original Ref No)', 
-        'Model Description', 'Qty', 'ITEM CODE (model, serial are not needed)', 'Unit Price'
-    ])
-
-    # Open the PDF using PyMuPDF
-    try:
-        pdf = pymupdf.open(pdf_file_path)
-        print("Successfully opened file in PyMuPDF")
-    except Exception as e:
-        print(f"Error opening PDF: {e}")
-        return pd.DataFrame()
-
-    # Define the customer codes mapping
-    cust_codes_df = pd.DataFrame({
-        'Customer Code': [...],  # List of codes
-        'Code': [...]  # Corresponding values
-    }).set_index('Customer Code')
-
-    # Define text extraction rectangles
-    invnum_rect = pymupdf.Rect(500, 100, 580, 117)
-    invdate_rect = pymupdf.Rect(500, 117.5, 580, 132)
-
-    for page in pdf:
-        tables = page.find_tables()
-        table_df = tables[0].to_pandas()
-
-        ref_num = table_df.iloc[6, 3]
-        cc_idx = next((i for i, chr in enumerate(ref_num) if chr.isdigit()), len(ref_num))
-        cc_char = ref_num[:cc_idx]
-        cust_code = cust_codes_df.loc[cc_char, 'Code']
-
-        st_calist = table_df.iloc[0, 11].split('\n')
-        st_company, st_address = st_calist[0], st_calist[1]
-        st_city = table_df.iloc[3, 11]
-        st_state, st_zip = table_df.iloc[3, 17].split(' ')
-
-        or_date = ref_num.replace(cc_char, '')[:6] if '-' not in ref_num else ref_num.split('-')[0]
-        or_datef = pd.to_datetime(or_date[-6:], format='%m%d%y').strftime('%m/%d/%Y')
-
-        inv_num = page.get_textbox(invnum_rect)
-        inv_date = page.get_textbox(invdate_rect)
-
-        modelno_list = re.sub(r'[^\w\s]', '', re.sub(r'\([^)]*\)', '', table_df.iloc[10, 0])).split('\n')
-        shipq_list = table_df.iloc[10, 10].split('\n')
-        up_list = table_df.iloc[10, 12].split('\n')
-
-        if len({len(modelno_list), len(shipq_list), len(up_list)}) != 1:
-            raise ValueError('Not all lists are the same length!')
-
-        for i in range(len(modelno_list)):
-            output = output._append({
-                'Customer Code': cust_code, 'Order Date': or_datef, 'Receive Date': inv_date, 'Issue Date': inv_date, 
-                'Ref No **\n(Invoice No)': ref_num, 'Ref No 2': inv_num, 'ShipTo\nCompany': st_company, 
-                'ShipTo\nAddress': st_address, 'ShipTo\nCity': st_city, 'ShipTo\nState': st_state, 
-                'ShipTo\nZip Code': st_zip, 'Model No **': modelno_list[i], 
-                'Item Serial No **\n(Original Ref No)': ref_num, 'Qty': shipq_list[i], 'Unit Price': '$' + up_list[i]
-            }, ignore_index=True)
-
-    output['Biz Type'] = 'LPT'
-    output['WH Code'] = 'WHZZ'
-    output['Type\nIN/OUT/INOUT/\nOUTRETURN/INRETURN'] = 'INOUT'
-    output['Vendor Code'] = '104256'
-    output['Memo'] = 'LG PARTS'
-    output['ShipFrom\nCompany'] = 'LG ELECTRONICS ALABAMA INC'
-    output['ShipFrom\nAddress'] = '201 James Record Road - Bldg 3'
-    output['ShipFrom\nCity'] = 'Huntsville'
-    output['ShipFrom\nState'] = 'AL'
-    output['ShipFrom\nZip Code'] = '35824'
-    output['ShipFrom\nCountry Code'] = 'USA'
-
-    return output
-
-
-
 class LGPartsProcessor(PDFProcessor):
     """Processor for LG Parts PDF files."""
     
@@ -678,13 +586,13 @@ class LGPartsProcessor(PDFProcessor):
         'Customer Code': [
             'NA', 'FL', 'STA', 'NW', 'WA', 'EA', 'LY', 'SA', 'AD', 'AMP', 'BB', 'IHG', 'OCY', 'FT', 'KG', 'ID', 'BI', 'YB', 
             'JJ', 'WEA', 'DLP', 'EL', 'TRI', 'RLP', 'ZQN', 'WLA', 'AMK', 'END', 'EN', 'WL', 'AWO', 'DSC', 'GRW', 'TD', 'KW',
-            'MHD', 'LC'
+            'MHD', 'LC', 'KH', 'NE', 'BN'
         ],
         'Code': [
             '102299', '102300', '102301', '102302', '102303', '102304', '102305', '102073', '102311', '101865', '102180', 
             '102150', '101552', '101741', '102310', '102218', '101975', '100249', '101695', '102256', '102401', '101880', 
             '102500', '102490', '102543', '102579', '100165', '102604', '102604', '102579', '100933', '102025', '102687', '100254', '1400',
-            '102767', '102714'
+            '102767', '102714', '500000', '500000', '10090'
         ]
     }).set_index('Customer Code')
     
@@ -719,9 +627,11 @@ class LGPartsProcessor(PDFProcessor):
         
         for page in self.pdf_doc:
             table_df = self.extract_table_data(page, 0)
+            print(table_df)
             
             # Extract reference number and customer code
             ref_num = table_df.iloc[6, 3]
+            print(ref_num)
             cc_idx = next((i for i, chr in enumerate(ref_num) if chr.isdigit()), len(ref_num))
             cc_char = ref_num[:cc_idx]
             cust_code = self.get_customer_code(ref_num)
