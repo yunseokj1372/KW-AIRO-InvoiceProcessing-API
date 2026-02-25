@@ -586,13 +586,13 @@ class LGPartsProcessor(PDFProcessor):
         'Customer Code': [
             'NA', 'FL', 'STA', 'NW', 'WA', 'EA', 'LY', 'SA', 'AD', 'AMP', 'BB', 'IHG', 'OCY', 'FT', 'KG', 'ID', 'BI', 'YB', 
             'JJ', 'WEA', 'DLP', 'EL', 'TRI', 'RLP', 'ZQN', 'WLA', 'AMK', 'END', 'EN', 'WL', 'AWO', 'DSC', 'GRW', 'TD', 'KW',
-            'MHD', 'LC', 'KH', 'NE', 'BN'
+            'MHD', 'LC', 'KH', 'NE', 'BN', 'RF', 'RL'
         ],
         'Code': [
             '102299', '102300', '102301', '102302', '102303', '102304', '102305', '102073', '102311', '101865', '102180', 
             '102150', '101552', '101741', '102310', '102218', '101975', '100249', '101695', '102256', '102401', '101880', 
             '102500', '102490', '102543', '102579', '100165', '102604', '102604', '102579', '100933', '102025', '102687', '100254', '1400',
-            '102767', '102714', '500000', '500000', '10090'
+            '102767', '102714', '500000', '500000', '10090', '102617', '102490'
         ]
     }).set_index('Customer Code')
     
@@ -603,20 +603,52 @@ class LGPartsProcessor(PDFProcessor):
     
     def get_customer_code(self, ref_num: str) -> str:
         """Extract customer code from reference number."""
+        if not ref_num:
+            return ''
         cc_idx = next((i for i, chr in enumerate(ref_num) if chr.isdigit()), len(ref_num))
         cc_char = ref_num[:cc_idx]
-        return self.CUSTOMER_CODES.loc[cc_char, 'Code']
+        if cc_char in self.CUSTOMER_CODES.index:
+            return self.CUSTOMER_CODES.loc[cc_char, 'Code']
+        return ''
     
     def format_date(self, ref_num: str, cc_char: str) -> str:
         """Format order date from reference number."""
+        if not ref_num:
+            return ''
         if '-' in ref_num:
             or_date = ref_num.split('-')[0]
         else:
             or_date = ref_num.replace(cc_char, '')[:6]
         
         or_date = or_date[len(or_date) - 6:]
-        or_date = re.findall(r'\d+', or_date)
-        return pd.to_datetime(or_date, format='%m%d%y').strftime('%m/%d/%Y')
+        or_date_str = re.findall(r'\d+', or_date)
+        if or_date_str:
+            or_date_str = or_date_str[0]
+        else:
+            return ''
+        try:
+            return pd.to_datetime(or_date_str, format='%m%d%y').strftime('%m/%d/%Y')
+        except Exception:
+            return ''
+
+    def _find_first_row_with_value(self, table_df: pd.DataFrame, value: str) -> Optional[int]:
+        """Find the first row containing an exact value in any column."""
+        for r in range(table_df.shape[0]):
+            for c in range(table_df.shape[1]):
+                cell = table_df.iloc[r, c]
+                if isinstance(cell, str) and cell.strip() == value:
+                    return r
+        return None
+
+    def _safe_text(self, table_df: pd.DataFrame, row: int, col: int) -> str:
+        """Safely read a cell as stripped string."""
+        try:
+            cell = table_df.iloc[row, col]
+            if cell is None:
+                return ''
+            return str(cell).strip()
+        except Exception:
+            return ''
     
     def process_pdf(self, pdf_file_path: str) -> pd.DataFrame:
         """Process LG Parts PDF file and return extracted data."""
@@ -627,33 +659,62 @@ class LGPartsProcessor(PDFProcessor):
         
         for page in self.pdf_doc:
             table_df = self.extract_table_data(page, 0)
-            print(table_df)
             
             # Extract reference number and customer code
-            ref_num = table_df.iloc[6, 3]
-            print(ref_num)
+            order_header_row = self._find_first_row_with_value(table_df, 'CUST.(Web) NO.')
+            order_row = order_header_row + 1 if order_header_row is not None else 5
+            ref_num = self._safe_text(table_df, order_row, 3)
             cc_idx = next((i for i, chr in enumerate(ref_num) if chr.isdigit()), len(ref_num))
             cc_char = ref_num[:cc_idx]
             cust_code = self.get_customer_code(ref_num)
             
-            # Extract shipping information
-            st_calist = table_df.iloc[0, 11].split('\n')
-            st_company, st_address = st_calist[0], st_calist[1]
-            st_city = table_df.iloc[3, 11]
-            st_state, st_zip = table_df.iloc[3, 17].split(' ')
+            # Extract shipping information from Ship To block
+            page_text = page.get_text()
+            st_company, st_address = '', ''
+            ship_block_match = re.search(r'SHIP TO\s*\n(.*?)\nCUST\.\(Web\) NO\.', page_text, re.DOTALL)
+            if ship_block_match:
+                ship_lines = [line.strip() for line in ship_block_match.group(1).split('\n') if line.strip()]
+                # Lines 0-1 are Bill To (KW ABSC, INC. / 18655 Bishop Ave.)
+                # Lines 2-3 are actual Ship To Company and Address
+                if len(ship_lines) >= 3:
+                    st_company = ship_lines[2]
+                if len(ship_lines) >= 4:
+                    st_address = ship_lines[3]
+            st_city = self._safe_text(table_df, 2, 11)
+            st_state_zip = self._safe_text(table_df, 2, 17)
+            st_state_zip_parts = st_state_zip.split()
+            st_state = st_state_zip_parts[0] if len(st_state_zip_parts) >= 1 else ''
+            st_zip = st_state_zip_parts[1] if len(st_state_zip_parts) >= 2 else ''
             
             # Process dates
             or_datef = self.format_date(ref_num, cc_char)
-            inv_num = self.get_textbox(page, self.TEXT_BOXES['invoice_number'])
-            inv_date = self.get_textbox(page, self.TEXT_BOXES['invoice_date'])
+            inv_num = self.get_textbox(page, self.TEXT_BOXES['invoice_number']).strip()
+            inv_date = self.get_textbox(page, self.TEXT_BOXES['invoice_date']).strip()
             
             # Process model numbers and quantities
-            modelno_list = re.sub(r'[^\w\s]', '', re.sub(r'\([^)]*\)', '', table_df.iloc[10, 0])).split('\n')
-            shipq_list = table_df.iloc[10, 10].split('\n')
-            up_list = table_df.iloc[10, 12].split('\n')
+            part_header_row = self._find_first_row_with_value(table_df, 'PART NO')
+            data_start_row = (part_header_row + 2) if part_header_row is not None else 9
+            modelno_list = []
+            modeldesc_list = []
+            shipq_list = []
+            up_list = []
+            
+            for r in range(data_start_row, table_df.shape[0]):
+                model_cell = self._safe_text(table_df, r, 0)
+                if not model_cell or model_cell.startswith('PLEASE SEND REMITTANCE'):
+                    break
+                
+                model_clean = re.sub(r'[^\w\s-]', '', re.sub(r'\([^)]*\)', '', model_cell)).strip()
+                if not model_clean:
+                    continue
+                
+                modelno_list.append(model_clean)
+                modeldesc_list.append(self._safe_text(table_df, r, 2))
+                shipq_list.append(self._safe_text(table_df, r, 10))
+                up_list.append(self._safe_text(table_df, r, 12))
             
             # Validate list lengths
-            self.validate_list_lengths([modelno_list, shipq_list, up_list])
+            self.validate_list_lengths([modelno_list, modeldesc_list, shipq_list, up_list])
             
             # Populate output
             for i in range(len(modelno_list)):
@@ -663,6 +724,8 @@ class LGPartsProcessor(PDFProcessor):
                     'ShipTo\nCompany': st_company, 'ShipTo\nAddress': st_address, 'ShipTo\nCity': st_city,
                     'ShipTo\nState': st_state, 'ShipTo\nZip Code': st_zip, 'Model No **': modelno_list[i],
                     'Item Serial No **\n(Original Ref No)': ref_num, 'Qty': shipq_list[i],
+                    'Model Description': modeldesc_list[i],
+                    'ITEM CODE (model, serial are not needed)': modelno_list[i],
                     'Unit Price': '$' + up_list[i]
                 }, ignore_index=True)
         
