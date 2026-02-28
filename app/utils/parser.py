@@ -704,14 +704,22 @@ class LGPartsProcessor(PDFProcessor):
                 if not model_cell or model_cell.startswith('PLEASE SEND REMITTANCE'):
                     break
                 
-                model_clean = re.sub(r'[^\w\s-]', '', re.sub(r'\([^)]*\)', '', model_cell)).strip()
-                if not model_clean:
-                    continue
+                # Split multi-line cells (multiple models in one cell)
+                model_parts = [m.strip() for m in model_cell.split('\n') if m.strip()]
+                desc_parts = [d.strip() for d in self._safe_text(table_df, r, 2).split('\n') if d.strip()]
+                qty_parts = [q.strip() for q in self._safe_text(table_df, r, 10).split('\n') if q.strip()]
+                price_parts = [p.strip() for p in self._safe_text(table_df, r, 12).split('\n') if p.strip()]
                 
-                modelno_list.append(model_clean)
-                modeldesc_list.append(self._safe_text(table_df, r, 2))
-                shipq_list.append(self._safe_text(table_df, r, 10))
-                up_list.append(self._safe_text(table_df, r, 12))
+                # Process each model separately
+                for i, model_raw in enumerate(model_parts):
+                    model_clean = re.sub(r'[^\w\s-]', '', re.sub(r'\([^)]*\)', '', model_raw)).strip()
+                    if not model_clean:
+                        continue
+                    
+                    modelno_list.append(model_clean)
+                    modeldesc_list.append(desc_parts[i] if i < len(desc_parts) else '')
+                    shipq_list.append(qty_parts[i] if i < len(qty_parts) else '')
+                    up_list.append(price_parts[i] if i < len(price_parts) else '')
             
             # Validate list lengths
             self.validate_list_lengths([modelno_list, modeldesc_list, shipq_list, up_list])
