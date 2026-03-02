@@ -701,28 +701,67 @@ class LGPartsProcessor(PDFProcessor):
             
             for r in range(data_start_row, table_df.shape[0]):
                 model_cell = self._safe_text(table_df, r, 0)
-                if not model_cell or model_cell.startswith('PLEASE SEND REMITTANCE'):
+                if not model_cell:
                     break
+                
+                # Stop if we hit footer text
+                if any(keyword in model_cell.upper() for keyword in [
+                    'PLEASE SEND REMITTANCE', 'ORIGINAL PART NO ORDERED', 
+                    'SUBSTITUE PART SHIPPED', 'NETWORK PLACE', 'CHICAGO',
+                    'PAYMENT INSTRUCTION', 'MAIL PAYMENT'
+                ]):
+                    break
+                
+                # Get corresponding cells
+                desc_cell = self._safe_text(table_df, r, 2)
+                qty_cell = self._safe_text(table_df, r, 10)
+                price_cell = self._safe_text(table_df, r, 12)
                 
                 # Split multi-line cells (multiple models in one cell)
                 model_parts = [m.strip() for m in model_cell.split('\n') if m.strip()]
-                desc_parts = [d.strip() for d in self._safe_text(table_df, r, 2).split('\n') if d.strip()]
-                qty_parts = [q.strip() for q in self._safe_text(table_df, r, 10).split('\n') if q.strip()]
-                price_parts = [p.strip() for p in self._safe_text(table_df, r, 12).split('\n') if p.strip()]
+                desc_parts = [d.strip() for d in desc_cell.split('\n') if d.strip()]
+                qty_parts = [q.strip() for q in qty_cell.split('\n') if q.strip()]
+                price_parts = [p.strip() for p in price_cell.split('\n') if p.strip()]
                 
                 # Process each model separately
                 for i, model_raw in enumerate(model_parts):
+                    # Skip if this line looks like a substitution note or footer
+                    if any(keyword in model_raw.upper() for keyword in [
+                        'ORIGINAL PART', 'SUBSTITUE', 'PLEASE SEND', 'REMITTANCE',
+                        'NETWORK PLACE', 'CHICAGO', 'PAYMENT', 'MAIL PAYMENT'
+                    ]):
+                        continue
+                    
+                    # Clean model number (remove parentheses and special chars)
                     model_clean = re.sub(r'[^\w\s-]', '', re.sub(r'\([^)]*\)', '', model_raw)).strip()
+                    
+                    # Skip if empty after cleaning
                     if not model_clean:
+                        continue
+                    
+                    # Skip if no corresponding quantity or price (indicates it's not a real line item)
+                    if i >= len(qty_parts) or i >= len(price_parts):
+                        continue
+                    
+                    # Skip if quantity or price is empty/invalid
+                    qty = qty_parts[i] if i < len(qty_parts) else ''
+                    price = price_parts[i] if i < len(price_parts) else ''
+                    
+                    if not qty or not price:
+                        continue
+                    
+                    # Validate model number format (should be alphanumeric)
+                    if not re.match(r'^[A-Z0-9][A-Z0-9\s-]*$', model_clean, re.IGNORECASE):
                         continue
                     
                     modelno_list.append(model_clean)
                     modeldesc_list.append(desc_parts[i] if i < len(desc_parts) else '')
-                    shipq_list.append(qty_parts[i] if i < len(qty_parts) else '')
-                    up_list.append(price_parts[i] if i < len(price_parts) else '')
+                    shipq_list.append(qty)
+                    up_list.append(price)
             
             # Validate list lengths
-            self.validate_list_lengths([modelno_list, modeldesc_list, shipq_list, up_list])
+            if modelno_list:
+                self.validate_list_lengths([modelno_list, modeldesc_list, shipq_list, up_list])
             
             # Populate output
             for i in range(len(modelno_list)):
