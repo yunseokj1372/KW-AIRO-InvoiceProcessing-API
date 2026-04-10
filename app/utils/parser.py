@@ -308,6 +308,25 @@ class ASISProcessor(PDFProcessor):
         'ShipFrom\nZip Code': '07632',
         'ShipFrom\nCountry Code': 'USA'
     }
+
+    @staticmethod
+    def _asis_model_numbers_for_qty(model_cell, qty_count: int) -> List[str]:
+        """
+        LG AS-IS line items put models in a newline-separated cell. Older PDFs interleave
+        full SKU (e.g. LK65C.ASWCNA0) with a duplicate base-only line (LK65C); newer PDFs
+        list one full SKU per line. Prefer dotted lines when their count matches qty;
+        otherwise fall back to even-index lines (legacy interleaved layout).
+        """
+        lines = [ln.strip() for ln in str(model_cell).split('\n') if ln.strip()]
+        dotted = [ln.split('.', 1)[0] for ln in lines if '.' in ln]
+        even_indexed = [lines[i].split('.', 1)[0] for i in range(len(lines)) if i % 2 == 0]
+        if len(dotted) == qty_count:
+            return dotted
+        if len(even_indexed) == qty_count:
+            return even_indexed
+        raise ValueError(
+            f'ASIS model/qty mismatch: dotted={len(dotted)}, even_index={len(even_indexed)}, qty={qty_count}'
+        )
     
     def process_pdf(self, pdf_file_path: str) -> pd.DataFrame:
         """Process ASIS PDF file and return extracted data."""
@@ -323,16 +342,12 @@ class ASISProcessor(PDFProcessor):
             inv_num = self.extract_table_data(page, 1).columns[1]
             date = self.extract_table_data(page, 2).columns[1]
             
-            # Process model numbers
-            modelno_list = table_df.iloc[7, 0].split('\n')
-            modelno_list = [modelno_list[i] for i in range(len(modelno_list)) if i % 2 == 0]
-            modelno_list = [i.split('.', 1)[0] for i in modelno_list]
-            
             # Extract other data
             poref_num = table_df['P.O./ REF. NO.'][0]
             cp_num = table_df.iloc[3, 4]
             shipq_list = table_df.iloc[7, 11].split('\n')
             up_list = table_df.iloc[7, 13].split('\n')
+            modelno_list = self._asis_model_numbers_for_qty(table_df.iloc[7, 0], len(shipq_list))
             
             # Validate list lengths
             self.validate_list_lengths([modelno_list, shipq_list, up_list])
